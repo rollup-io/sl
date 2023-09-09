@@ -234,6 +234,7 @@ export async function linearWebhookHandler(
 
             let markdown = data.description;
 
+            // Re-fetching the issue description returns it with public image URLs
             if (markdown?.match(GENERAL.INLINE_IMG_TAG_REGEX)) {
                 const publicIssue = await linear.issue(data.id);
                 if (publicIssue?.description) {
@@ -780,30 +781,34 @@ export async function linearWebhookHandler(
                 !priorityLabels[updatedFrom.priority]
             ) {
                 const reason = `Could not find a priority label for ${updatedFrom.priority} or ${data.priority}.`;
-                console.log(reason);
                 throw new ApiError(reason, 403);
             }
 
-            // Remove old priority label
             const prevPriorityLabel = priorityLabels[updatedFrom.priority];
-            const removedLabelResponse = await got.delete(
-                `${GITHUB.REPO_ENDPOINT}/${syncedIssue.GitHubRepo.repoName}/issues/${syncedIssue.githubIssueNumber}/labels/${prevPriorityLabel.name}`,
-                {
-                    headers: {
-                        Authorization: githubAuthHeader,
-                        "User-Agent": userAgentHeader
-                    }
-                }
-            );
 
-            if (removedLabelResponse.statusCode > 201) {
-                console.log(
-                    `Did not remove priority label "${prevPriorityLabel.name}".`
+            // Remove old priority label
+            try {
+                const removedLabelResponse = await got.delete(
+                    `${GITHUB.REPO_ENDPOINT}/${syncedIssue.GitHubRepo.repoName}/issues/${syncedIssue.githubIssueNumber}/labels/${prevPriorityLabel.name}`,
+                    {
+                        headers: {
+                            Authorization: githubAuthHeader,
+                            "User-Agent": userAgentHeader
+                        }
+                    }
                 );
-            } else {
-                console.log(
-                    `Removed priority "${prevPriorityLabel.name}" from issue #${syncedIssue.githubIssueNumber}.`
-                );
+
+                if (removedLabelResponse.statusCode > 201) {
+                    console.log(
+                        `Did not remove priority label "${prevPriorityLabel.name}".`
+                    );
+                } else {
+                    console.log(
+                        `Removed priority "${prevPriorityLabel.name}" from issue #${syncedIssue.githubIssueNumber}.`
+                    );
+                }
+            } catch (e) {
+                console.log("Could not remove previous priority label.");
             }
 
             if (data.priority === 0) {
@@ -820,7 +825,6 @@ export async function linearWebhookHandler(
             });
 
             if (error) {
-                console.log("Could not create label.");
                 throw new ApiError("Could not create label.", 403);
             }
 
@@ -837,12 +841,9 @@ export async function linearWebhookHandler(
             });
 
             if (applyLabelError) {
-                console.log("Could not apply label.");
                 throw new ApiError("Could not apply label.", 403);
             } else {
-                console.log(
-                    `Applied priority label "${labelName}" to issue #${syncedIssue.githubIssueNumber}.`
-                );
+                return `Applied priority label "${labelName}" to issue #${syncedIssue.githubIssueNumber}.`;
             }
         }
 

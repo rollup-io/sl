@@ -8,17 +8,15 @@ import {
     skipReason
 } from "../index";
 import { LinearClient } from "@linear/sdk";
-import {
-    prepareMarkdownContent,
-    replaceMentions,
-    upsertUser
-} from "../../pages/api/utils";
+import { prepareMarkdownContent, upsertUser } from "../../pages/api/utils";
 import {
     Issue,
     IssueCommentCreatedEvent,
     IssuesAssignedEvent,
     IssuesEvent,
+    IssuesLabeledEvent,
     IssuesUnassignedEvent,
+    IssuesUnlabeledEvent,
     MilestoneEvent,
     Repository,
     User
@@ -28,7 +26,7 @@ import {
     generateLinearUUID,
     updateLinearCycle
 } from "../linear";
-import { LINEAR } from "../constants";
+import { LINEAR, SHARED } from "../constants";
 import got from "got";
 import { linearQuery } from "../apollo";
 import { ApiError } from "../errors";
@@ -178,7 +176,6 @@ export async function githubWebhookHandler(
 
             if (!syncedIssue) {
                 const reason = skipReason("comment", issue.number);
-                console.log(reason);
                 return reason;
             }
 
@@ -210,13 +207,11 @@ export async function githubWebhookHandler(
         if (action === "edited") {
             if (!syncedMilestone?.cycleId) {
                 const reason = `Skipping over update for milestone "${milestone.title}" because it is not synced`;
-                console.log(reason);
                 return reason;
             }
 
             if (milestone.description?.includes(getSyncFooter())) {
                 const reason = `Skipping over update for milestone "${milestone.title}" because it is caused by sync`;
-                console.log(reason);
                 return reason;
             }
 
@@ -251,7 +246,6 @@ export async function githubWebhookHandler(
 
         if (!syncedIssue) {
             const reason = skipReason("edit", issue.number);
-            console.log(reason);
             return reason;
         }
 
@@ -262,7 +256,7 @@ export async function githubWebhookHandler(
 
         if ((description?.length || 0) > 1) description?.pop();
 
-        let modifiedDescription = await replaceMentions(
+        let modifiedDescription = await prepareMarkdownContent(
             description?.join("<sub>"),
             "github"
         );
@@ -291,7 +285,6 @@ export async function githubWebhookHandler(
 
         if (!syncedIssue) {
             const reason = skipReason("edit", issue.number);
-            console.log(reason);
             return reason;
         }
 
@@ -327,7 +320,6 @@ export async function githubWebhookHandler(
 
         if (syncedIssue) {
             const reason = `Not creating ticket as issue ${issue.number} already exists on Linear as ${syncedIssue.linearIssueNumber}.`;
-            console.log(reason);
             return reason;
         }
 
@@ -359,7 +351,6 @@ export async function githubWebhookHandler(
 
         if (!createdIssueData.success) {
             const reason = `Failed to create ticket for GitHub issue #${issue.number}.`;
-            console.log(reason);
             throw new ApiError(reason, 500);
         }
 
@@ -491,7 +482,6 @@ export async function githubWebhookHandler(
 
         if (!syncedIssue) {
             const reason = skipReason("assignee", issue.number);
-            console.log(reason);
             return reason;
         }
 
@@ -521,11 +511,9 @@ export async function githubWebhookHandler(
 
                 if (!response?.success) {
                     const reason = `Failed to remove assignee on Linear ticket for GitHub issue #${issue.number}.`;
-                    console.log(reason);
                     throw new ApiError(reason, 500);
                 } else {
                     const reason = `Removed assignee from Linear ticket for GitHub issue #${issue.number}.`;
-                    console.log(reason);
                     return reason;
                 }
             }
@@ -541,7 +529,6 @@ export async function githubWebhookHandler(
 
             if (!newAssignee) {
                 const reason = `Skipping assignee for issue #${issue.number} as no Linear user was found for GitHub user ${modifiedAssignee?.login}.`;
-                console.log(reason);
                 return reason;
             }
 
@@ -553,11 +540,9 @@ export async function githubWebhookHandler(
 
                 if (!response?.success) {
                     const reason = `Failed to add assignee on Linear ticket for GitHub issue #${issue.number}.`;
-                    console.log(reason);
                     throw new ApiError(reason, 500);
                 } else {
                     const reason = `Added assignee to Linear ticket for GitHub issue #${issue.number}.`;
-                    console.log(reason);
                     return reason;
                 }
             }
@@ -567,7 +552,6 @@ export async function githubWebhookHandler(
 
         if (!syncedIssue) {
             const reason = skipReason("milestone", issue.number);
-            console.log(reason);
             return reason;
         }
 
@@ -582,11 +566,9 @@ export async function githubWebhookHandler(
 
             if (!response?.success) {
                 const reason = `Failed to remove Linear ticket from cycle for GitHub issue #${issue.number}.`;
-                console.log(reason);
                 throw new ApiError(reason, 500);
             } else {
                 const reason = `Removed Linear ticket from cycle for GitHub issue #${issue.number}.`;
-                console.log(reason);
                 return reason;
             }
         }
@@ -601,7 +583,6 @@ export async function githubWebhookHandler(
         if (!syncedMilestone) {
             if (milestone.description?.includes(getSyncFooter())) {
                 const reason = `Skipping over milestone "${milestone.title}" because it is caused by sync`;
-                console.log(reason);
                 return reason;
             }
 
@@ -615,7 +596,6 @@ export async function githubWebhookHandler(
 
             if (!createdCycle?.data?.cycleCreate?.cycle?.id) {
                 const reason = `Failed to create Linear cycle for GitHub milestone #${milestone.number}.`;
-                console.log(reason);
                 throw new ApiError(reason, 500);
             }
 
@@ -635,13 +615,72 @@ export async function githubWebhookHandler(
 
         if (!response?.success) {
             const reason = `Failed to add Linear ticket to cycle for GitHub issue #${issue.number}.`;
-            console.log(reason);
             throw new ApiError(reason, 500);
         } else {
             const reason = `Added Linear ticket to cycle for GitHub issue #${issue.number}.`;
-            console.log(reason);
             return reason;
         }
+    } else if (["labeled", "unlabeled"].includes(action)) {
+        // Label added to issue
+
+        if (!syncedIssue) {
+            return skipReason("label", issue.number);
+        }
+
+        const { label } = body as IssuesLabeledEvent | IssuesUnlabeledEvent;
+
+        const linearLabels = label?.name
+            ? await linear.issueLabels({
+                  filter: {
+                      name: {
+                          containsIgnoreCase: label.name
+                      }
+                  }
+              })
+            : null;
+
+        const priorityLabels = Object.values(SHARED.PRIORITY_LABELS);
+        if (priorityLabels.map(l => l.name).includes(label?.name)) {
+            await linear.issueUpdate(syncedIssue.linearIssueId, {
+                priority:
+                    // Ignore removal of priority labels since it's triggered by priority change from Linear
+                    action === "unlabeled"
+                        ? null
+                        : priorityLabels.find(l => l.name === label?.name)
+                              ?.value
+            });
+        }
+
+        if (!linearLabels?.nodes?.length) {
+            // Could create the label in Linear here, but we'll skip it
+            // to avoid cluttering Linear with priority/estimate labels.
+            return `Skipping label "${label?.name}" for issue #${issue.number} as no Linear label was found.`;
+        }
+
+        const linearLabelIDs = linearLabels.nodes.map(label => label.id);
+
+        const ticket = await linear.issue(syncedIssue.linearIssueId);
+
+        const currentTicketLabels = await ticket?.labels();
+        const currentTicketLabelIDs = currentTicketLabels?.nodes?.map(
+            n => n.id
+        );
+
+        const response = await linear.issueUpdate(syncedIssue.linearIssueId, {
+            labelIds: [
+                ...(action === "labeled" ? linearLabelIDs : []),
+                ...currentTicketLabelIDs.filter(
+                    id => !linearLabelIDs.includes(id)
+                )
+            ]
+        });
+
+        if (!response?.success) {
+            const reason = `Failed to add label "${label?.name}" to Linear ticket for GitHub issue #${issue.number}.`;
+            throw new ApiError(reason, 500);
+        }
+
+        return `Added label "${label?.name}" to Linear ticket for GitHub issue #${issue.number}.`;
     }
 }
 
